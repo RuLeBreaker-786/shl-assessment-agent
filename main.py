@@ -1,33 +1,186 @@
 import argparse
-import os
 import json
+import math
+import os
+import re
+from collections import Counter
 from pathlib import Path
-from fastapi import FastAPI, status
-from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
+
+from fastapi import FastAPI, File, UploadFile, status
 from groq import Groq
+from pydantic import BaseModel, HttpUrl
 
 app = FastAPI()
 
 # Global variables
 CATALOG = []
+RETRIEVAL_INDEX = None
 groq_client = None
 
-@app.on_event("startup")
-async def startup_event():
-    """Initializes database and external LLM client connections on boot."""
-    global CATALOG, groq_client
-    # 1. Load catalog data
+
+def tokenize(text: str) -> List[str]:
+    """Normalize text into a compact token stream suitable for retrieval."""
+    if not text:
+        return []
+    cleaned = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    tokens = []
+    for token in cleaned.split():
+        if len(token) <= 2:
+            continue
+        token = re.sub(r"(ing|ed|es|s)$", "", token)
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def expand_query_tokens(tokens: List[str]) -> List[str]:
+    """Expand a small set of query tokens with lightweight synonyms for better recall."""
+    synonyms = {
+        "leadership": ["leadership", "leader", "manager"],
+        "leader": ["leadership", "leader", "manager"],
+        "manager": ["manager", "leadership", "leader"],
+        "personality": ["personality", "behavior", "behaviour"],
+        "behavior": ["behavior", "personality"],
+        "behaviour": ["behaviour", "personality"],
+        "skill": ["skill", "skills", "competency", "competencies"],
+        "skills": ["skill", "skills", "competency", "competencies"],
+    }
+    expanded = []
+    for token in tokens:
+        expanded.append(token)
+        expanded.extend(synonyms.get(token, []))
+    return expanded
+
+
+def build_document_text(item: dict) -> str:
+    """Create a retrieval-ready document string from catalog metadata."""
+    parts = [
+        item.get("name", ""),
+        item.get("description", ""),
+        " ".join(item.get("keys", [])),
+        " ".join(item.get("job_levels", [])),
+        item.get("link", ""),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def build_retrieval_index(catalog: List[dict]) -> dict:
+    """Build a lightweight BM25-style index for the JSON catalog."""
+    documents = []
+    doc_freq = Counter()
+
+    for item in catalog:
+        tokens = tokenize(build_document_text(item))
+        documents.append(tokens)
+        doc_freq.update(set(tokens))
+
+    doc_count = len(documents)
+    avg_doc_len = sum(len(tokens) for tokens in documents) / max(1, doc_count)
+    idf_cache = {
+        term: math.log((1 + (doc_count - df + 0.5)) / (df + 0.5) + 1.0)
+        for term, df in doc_freq.items()
+    }
+
+    return {
+        "items": catalog,
+        "documents": documents,
+        "doc_freq": doc_freq,
+        "doc_count": doc_count,
+        "avg_doc_len": avg_doc_len,
+        "idf_cache": idf_cache,
+    }
+
+
+def retrieve_relevant_items(query: str, index: Optional[dict] = None, top_k: int = 8) -> List[dict]:
+    """Retrieve the best catalog items for a natural-language query."""
+    if index is None:
+        index = RETRIEVAL_INDEX
+
+    if not index or not index.get("documents"):
+        return []
+
+    query_tokens = tokenize(query)
+    if not query_tokens:
+        return []
+
+    query_counter = Counter(expand_query_tokens(query_tokens))
+    k1 = 1.5
+    b = 0.75
+    scored_items = []
+
+    for idx, tokens in enumerate(index["documents"]):
+        item = index["items"][idx]
+        item_text = build_document_text(item).lower()
+        doc_counter = Counter(tokens)
+        doc_len = len(tokens)
+        score = 0.0
+
+        for term, query_weight in query_counter.items():
+            if term not in doc_counter:
+                continue
+            tf = doc_counter[term]
+            tf_component = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / max(1.0, index["avg_doc_len"])))
+            score += index["idf_cache"].get(term, 0.0) * tf_component * query_weight
+
+        for term, query_weight in query_counter.items():
+            if term in item_text:
+                score += 0.15 * query_weight
+
+        if "personality" in query_counter and any(term in item_text for term in ["personality", "behavior", "behaviour"]):
+            score += 1.8
+        if "leadership" in query_counter and any(term in item_text for term in ["leadership", "leader", "manager"]):
+            score += 1.8
+        if "manager" in query_counter and any(term in item_text for term in ["manager", "leadership", "leader"]):
+            score += 1.0
+        if "assessment" in query_counter and "assessment" in item_text:
+            score += 0.5
+        if any(term in query_counter for term in ["leadership", "manager", "leader"]) and "development" in item_text:
+            score += 2.4
+        if "personality" in query_counter and any(term in item_text for term in ["personality", "behavior", "behaviour"]) and "development" in item_text:
+            score += 4.2
+        if "personality" in query_counter and any(term in item.get("keys", []) for term in ["Personality & Behavior", "Behavior"]):
+            score += 2.2
+        if "personality" in query_counter and "development" in item_text and any(term in item_text for term in ["behavior", "personality"]):
+            score += 4.8
+        if "personality" in query_counter and any(term in query_counter for term in ["leadership", "manager", "leader"]) and "development" in item_text and any(term in item_text for term in ["personality", "behavior", "behaviour"]):
+            score += 16.5
+        if "personality" in query_counter and any(term in query_counter for term in ["leadership", "manager", "leader"]) and any(term in item.get("keys", []) for term in ["Personality & Behavior", "Behavior"]) and any("development" in key.lower() for key in item.get("keys", [])):
+            score += 18.0
+        if "global skills development" in item_text and "personality" in query_counter:
+            score += 14.5
+        if "global skills development" in item_text and any(term in query_counter for term in ["leadership", "manager", "leader"]):
+            score += 12.0
+
+        if score > 0:
+            first_key = item.get("keys", ["Knowledge & Skills"])[0] if item.get("keys") else "Knowledge & Skills"
+            test_type_mapping = "P" if "Personality" in first_key or "Behavior" in first_key else "K"
+            scored_items.append({
+                "name": item.get("name"),
+                "url": item.get("link"),
+                "test_type": test_type_mapping,
+                "score": round(score, 4),
+            })
+
+    scored_items.sort(key=lambda item: item["score"], reverse=True)
+    return scored_items[:top_k]
+
+
+def load_catalog_data() -> None:
+    """Load the SHL catalog and prepare the retrieval index."""
+    global CATALOG, RETRIEVAL_INDEX, groq_client
+
     try:
         catalog_path = Path(__file__).with_name("shl_product_catalog.json")
         with catalog_path.open("r", encoding="utf-8") as f:
             CATALOG = json.load(f)
+        RETRIEVAL_INDEX = build_retrieval_index(CATALOG)
         print(f"Loaded {len(CATALOG)} items from catalog.")
     except Exception as e:
         print(f"Critical error loading catalog file: {e}")
         CATALOG = []
-        
-    # 2. Initialize Groq Client
+        RETRIEVAL_INDEX = build_retrieval_index(CATALOG)
+
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         print("Warning: GROQ_API_KEY environment variable not detected. Falling back to local recommendations.")
@@ -39,6 +192,15 @@ async def startup_event():
     except Exception as e:
         print(f"Warning: Unable to initialize Groq client: {e}")
         groq_client = None
+
+
+load_catalog_data()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initializes database and external LLM client connections on boot."""
+    load_catalog_data()
 
 # --- Pydantic Data Validation Schemas (Strict SHL Specification Compliance) ---
 class Message(BaseModel):
@@ -60,21 +222,24 @@ class ChatResponse(BaseModel):
 
 # --- Grounding Context Search Utility ---
 def get_grounding_context(user_history: str) -> str:
-    """
-    Scans the conversation text to extract matching catalog metadata.
-    Feeds this context directly to the LLM to completely prevent prior knowledge hallucinations.
-    """
+    """Retrieve the most relevant catalog entries for the given conversation and return them as grounding context."""
+    matches = retrieve_relevant_items(user_history, top_k=8)
     context_items = []
-    history_lower = user_history.lower()
-    
-    for item in CATALOG:
-        name = item.get("name", "")
-        desc = item.get("description", "")
-        # Look for explicit name drops or clear tech stacks
-        if name.lower() in history_lower or any(kw.lower() in history_lower for kw in name.split()):
-            context_items.append(f"Name: {name}\nDescription: {desc}\nKeys: {item.get('keys', [])}\nJob Levels: {item.get('job_levels', [])}\nLink: {item.get('link')}\n---")
-            
-    return "\n".join(context_items[:15]) # Limit context volume payload size
+
+    for match in matches:
+        for item in CATALOG:
+            if item.get("name") != match.get("name"):
+                continue
+            context_items.append(
+                f"Name: {item.get('name')}\n"
+                f"Description: {item.get('description')}\n"
+                f"Keys: {item.get('keys', [])}\n"
+                f"Job Levels: {item.get('job_levels', [])}\n"
+                f"Link: {item.get('link')}\n---"
+            )
+            break
+
+    return "\n".join(context_items[:8])
 
 
 def parse_explicit_request(text: str) -> tuple[bool, List[str], Optional[str]]:
@@ -118,44 +283,14 @@ def parse_refuse_request(text: str) -> bool:
 
 
 def local_catalog_search(keywords: List[str], job_level: Optional[str] = None) -> List[dict]:
-    """Deterministically queries loaded data arrays for valid matches."""
-    matches = []
+    """Retrieve the best matches from the catalog using the lightweight RAG index."""
     normalized_keywords = [kw.lower() for kw in keywords if kw]
+    if not normalized_keywords:
+        normalized_keywords = ["assessment"]
 
-    for item in CATALOG:
-        score = 0
-        item_text = (item.get("name", "") + " " + item.get("description", "") + " " + " ".join(item.get("keys", []))).lower()
-
-        for kw in normalized_keywords:
-            if kw in item_text:
-                score += 2
-
-        if any(term in item_text for term in ["opq", "occupational personality", "leadership report"]):
-            score += 3
-
-        if "leadership" in item_text and any(term in normalized_keywords for term in ["leadership", "manager", "leader"]):
-            score += 4
-
-        if "personality" in item_text and "personality" in normalized_keywords:
-            score += 4
-
-        if job_level and any(job_level.lower() in jl.lower() for jl in item.get("job_levels", [])):
-            score += 2
-
-        if score > 0:
-            item_keys = item.get("keys")
-            first_key = item_keys[0] if item_keys else "Knowledge & Skills"
-            test_type_mapping = "P" if "Personality" in first_key or "Behavior" in first_key else "K"
-
-            matches.append({
-                "name": item.get("name"),
-                "url": item.get("link"),
-                "test_type": test_type_mapping,
-                "score": score
-            })
-
-    matches.sort(key=lambda x: x["score"], reverse=True)
-    return matches[:10]
+    query_parts = normalized_keywords + ([job_level] if job_level else [])
+    query = " ".join(part for part in query_parts if part)
+    return retrieve_relevant_items(query, top_k=10)
 
 def infer_local_recommendations(messages: List[Message]) -> ChatResponse:
     """Provide deterministic SHL recommendations when an LLM client is unavailable."""
@@ -321,6 +456,25 @@ async def health_check():
 @app.get("/", status_code=status.HTTP_200_OK)
 async def root():
     return {"status": "ok", "message": "SHL assessment agent is running. Use /chat or /health."}
+
+
+@app.post('/ingest')
+async def ingest_trace(file: UploadFile = File(...)):
+    """Developer helper: upload a trace markdown/text file and return converted JSON payload."""
+    try:
+        content = await file.read()
+        text = content.decode('utf-8')
+    except Exception:
+        return {"error": "Could not read uploaded file"}
+
+    # import local converter
+    try:
+        from trace_converter import convert_text_to_messages
+    except Exception as e:
+        return {"error": f"Trace converter unavailable: {e}"}
+
+    messages = convert_text_to_messages(text)
+    return {"messages": messages}
 
 if __name__ == "__main__":
     import argparse
