@@ -4,3 +4,4 @@ pydantic
 groq
 requests
 python-multipart
+streamlit
