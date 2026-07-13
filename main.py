@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import math
 import os
@@ -282,6 +283,74 @@ def parse_refuse_request(text: str) -> bool:
     return False
 
 
+def is_resume_section_message(content: str) -> bool:
+    if not content:
+        return False
+    first_line = content.splitlines()[0].strip().lower()
+    return any(keyword in first_line for keyword in [
+        "professional summary",
+        "summary",
+        "profile",
+        "about",
+        "overview",
+        "experience",
+        "work experience",
+        "professional experience",
+        "employment history",
+        "education",
+        "academic background",
+        "skills",
+        "technical skills",
+        "competencies",
+        "certifications",
+        "licenses",
+        "projects",
+        "achievements",
+        "leadership",
+        "leadership experience",
+        "training",
+        "publications",
+        "languages",
+        "interests",
+        "objective",
+        "career objective",
+        "volunteer experience",
+        "professional development",
+        "additional information",
+        "core competencies",
+        "areas of expertise",
+    ])
+
+
+def extract_resume_sections(messages: List[Message]) -> List[Message]:
+    return [m for m in messages if m.role == "user" and is_resume_section_message(m.content)]
+
+
+def get_last_user_query(messages: List[Message]) -> str:
+    non_resume = [m.content for m in messages if m.role == "user" and not is_resume_section_message(m.content)]
+    return non_resume[-1].strip() if non_resume else (messages[-1].content.strip() if messages else "")
+
+
+def build_resume_search_text(resume_sections: List[Message], query_text: str) -> str:
+    query_lower = query_text.lower() if query_text else ""
+    selected_sections = []
+
+    for section in resume_sections:
+        title_line = section.content.splitlines()[0].strip().lower()
+        if title_line and any(word in query_lower for word in title_line.split()):
+            selected_sections.append(section.content)
+            continue
+
+        if any(term in query_lower for term in ["resume", "candidate", "cv", "profile", "applicant", "uploaded"]):
+            selected_sections.append(section.content)
+
+    if not selected_sections:
+        selected_sections = [section.content for section in resume_sections if section.content.strip()]
+
+    selected_text = "\n\n".join(selected_sections)
+    return f"{query_text}\n\n{selected_text}" if query_text else selected_text
+
+
 def local_catalog_search(keywords: List[str], job_level: Optional[str] = None) -> List[dict]:
     """Retrieve the best matches from the catalog using the lightweight RAG index."""
     normalized_keywords = [kw.lower() for kw in keywords if kw]
@@ -294,7 +363,13 @@ def local_catalog_search(keywords: List[str], job_level: Optional[str] = None) -
 
 def infer_local_recommendations(messages: List[Message]) -> ChatResponse:
     """Provide deterministic SHL recommendations when an LLM client is unavailable."""
-    text = " ".join(m.content for m in messages if m.role == "user").lower()
+    resume_sections = extract_resume_sections(messages)
+    last_query = get_last_user_query(messages)
+
+    if resume_sections and last_query:
+        text = build_resume_search_text(resume_sections, last_query).lower()
+    else:
+        text = " ".join(m.content for m in messages if m.role == "user").lower()
 
     if parse_refuse_request(text):
         return ChatResponse(
@@ -460,12 +535,52 @@ async def root():
 
 @app.post('/ingest')
 async def ingest_trace(file: UploadFile = File(...)):
-    """Developer helper: upload a trace markdown/text file and return converted JSON payload."""
+    """Developer helper: upload a trace file and return converted JSON payload."""
     try:
         content = await file.read()
-        text = content.decode('utf-8')
-    except Exception:
-        return {"error": "Could not read uploaded file"}
+        text = ""
+
+        filename = (file.filename or "").lower()
+        content_type = (file.content_type or "").lower()
+
+        if content_type == "application/pdf" or filename.endswith(".pdf"):
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(io.BytesIO(content))
+                text = "\n\n".join((page.extract_text() or "") for page in reader.pages)
+                if not text.strip():
+                    return {"error": "PDF uploaded but text extraction returned empty content. Please use a text or markdown file if possible."}
+            except ImportError:
+                return {"error": "PDF upload requires PyPDF2. Install it with `pip install PyPDF2` or upload a text-based file."}
+            except Exception as e:
+                return {"error": f"PDF extraction failed: {e}"}
+        elif filename.endswith(".docx") or content_type in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",):
+            try:
+                from docx import Document
+                doc = Document(io.BytesIO(content))
+                text = "\n\n".join(p.text for p in doc.paragraphs if p.text)
+                if not text.strip():
+                    return {"error": "DOCX uploaded but text extraction returned empty content. Please upload a text-based file."}
+            except ImportError:
+                return {"error": "DOCX upload requires python-docx. Install it with `pip install python-docx` or upload a text-based file."}
+            except Exception as e:
+                return {"error": f"DOCX extraction failed: {e}"}
+        else:
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    text = content.decode("cp1252")
+                except UnicodeDecodeError:
+                    try:
+                        text = content.decode("latin-1")
+                    except UnicodeDecodeError:
+                        return {"error": "Could not decode uploaded file as text. Please upload plain text, markdown, JSON, or PDF."}
+
+        if not text.strip():
+            return {"error": "Uploaded file contained no readable text."}
+    except Exception as e:
+        return {"error": f"Could not read uploaded file: {e}"}
 
     # import local converter
     try:
@@ -492,3 +607,5 @@ if __name__ == "__main__":
         port=args.port,
         reload=args.reload,
     )
+
+    
