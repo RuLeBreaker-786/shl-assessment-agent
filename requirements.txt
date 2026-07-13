@@ -5,3 +5,5 @@ groq
 requests
 python-multipart
 streamlit
+PyPDF2
+python-docx
