@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 from urllib.parse import urljoin
 
 import requests
@@ -15,39 +16,67 @@ st.set_page_config(
 )
 
 st.session_state.setdefault("backend_url", os.environ.get("BACKEND_URL", BACKEND_URL_DEFAULT))
-st.session_state.setdefault("show_upload_panel", False)
 st.session_state.setdefault("last_uploaded_file", "")
+st.session_state.setdefault("user_input", "")
+st.session_state.setdefault("show_file_uploader", False)
+st.session_state.setdefault("saved_conversations", [])
+
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
 
 if "recommendations" not in st.session_state:
     st.session_state.recommendations = []
 
 
+def archive_current_conversation():
+    if st.session_state.messages:
+        session_name = f"Session {len(st.session_state.saved_conversations) + 1}"
+        st.session_state.saved_conversations.append(
+            {
+                "name": session_name,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "messages": [m.copy() for m in st.session_state.messages],
+            }
+        )
+
+
 def reset_conversation():
     st.session_state.messages = []
-    st.session_state.chat_history = []
     st.session_state.recommendations = []
-    st.session_state.show_upload_panel = False
     st.session_state.last_uploaded_file = ""
     st.session_state.user_input = ""
+    st.session_state.show_file_uploader = False
 
 
-def toggle_upload_panel():
-    st.session_state.show_upload_panel = not st.session_state.show_upload_panel
+def restore_conversation(index: int):
+    session = st.session_state.saved_conversations[index]
+    st.session_state.messages = [m.copy() for m in session["messages"]]
+    st.session_state.recommendations = []
+    st.session_state.user_input = ""
+    st.session_state.last_uploaded_file = ""
+    st.session_state.show_file_uploader = False
 
 
+def new_conversation():
+    if st.session_state.messages:
+        archive_current_conversation()
+    reset_conversation()
+
+
+def safe_rerun():
+    """Attempt to rerun the Streamlit script; silently no-op if not available."""
+    try:
+        # older/newer streamlit variations — guard against absence
+        if hasattr(st, "experimental_rerun"):
+            st.experimental_rerun()
+        elif hasattr(st, "rerun"):
+            st.rerun()
+    except Exception:
+        # If rerun isn't supported in the running environment (e.g. Render runtime), ignore
+        pass
 def chat_history_json() -> str:
-    history = [
-        {"role": role, "content": content}
-        for role, content in st.session_state.chat_history
-    ]
-    return json.dumps({"history": history}, indent=2)
-
+    return json.dumps({"messages": st.session_state.messages}, indent=2)
 
 def format_chat_message(role: str, content: str) -> None:
     if role == "user":
@@ -61,6 +90,14 @@ def format_chat_message(role: str, content: str) -> None:
             unsafe_allow_html=True,
         )
 
+def render_chat_messages(messages):
+    for msg in messages:
+        format_chat_message(msg.get("role", "user"), msg.get("content", ""))
+
+
+def conversation_json_payload(messages):
+    return json.dumps({"messages": messages}, indent=2)
+
 
 def call_backend_chat(messages, backend_url):
     url = urljoin(backend_url.rstrip("/"), "/chat")
@@ -72,7 +109,8 @@ def call_backend_chat(messages, backend_url):
 
 def call_backend_ingest(uploaded_file, backend_url):
     url = urljoin(backend_url.rstrip("/"), "/ingest")
-    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+    content_type = uploaded_file.type or "application/octet-stream"
+    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), content_type)}
     response = requests.post(url, files=files, timeout=30)
     response.raise_for_status()
     return response.json()
@@ -84,156 +122,203 @@ st.markdown(
     .main-container {padding: 0 40px 40px 40px;}
     .page-title {font-size: clamp(42px, 4vw, 56px); font-weight: 800; margin-bottom: 0.2rem;}
     .subtitle {color: #adb5bd; margin-top: 0; margin-bottom: 1.4rem; max-width: 760px;}
-    .tool-chip {display:inline-block; background:#eef4ff; color:#0f62fe; padding:10px 16px; border-radius:999px; margin:4px 6px 4px 0; cursor:pointer; font-size:14px;}
-    .tool-chip:hover {background:#d9e8ff;}
-    .chat-card {margin: 10px 0; display: flex;}
-    .bubble {padding: 18px 20px; border-radius: 22px; max-width: 100%; line-height: 1.6;}
+    .page-title {font-size: 32px; font-weight: 800; margin-bottom: 0.4rem;}
+    .subtitle {color: #4b5563; margin-top: 0; margin-bottom: 1rem; max-width: 680px;}
+    .search-panel {background: rgba(255,255,255,.96); border-radius: 28px; padding: 24px; box-shadow: 0 22px 44px rgba(15,23,42,0.08);}
+    .search-row {display: flex; gap: 14px; align-items: flex-start;}
+    .search-plus-button {width: 54px; height: 54px; border-radius: 50%; background: #0f62fe; color: white; font-size: 26px; font-weight: 700; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer;}
+    .search-note {color: #6b7280; margin-top: 12px;}
+    .search-textarea textarea {border-radius: 32px !important; padding: 22px 24px !important; min-height: 160px !important; border: 1px solid #d1d5db !important; box-shadow: none !important;}
+    .search-button button {background: #0f62fe !important; color: white !important; border-radius: 999px !important; padding: 16px 28px !important; font-weight: 700 !important;}
+    .chat-history-panel {margin-top: 24px;}
+    .chat-card {display: flex; margin-bottom: 16px;}
+    .chat-card .bubble {padding: 18px 20px; border-radius: 22px; max-width: 100%; line-height: 1.6;}
     .user-card {justify-content: flex-end;}
     .user-card .bubble {background: linear-gradient(135deg, #dbeafe, #e0f2fe); border-radius: 22px 22px 8px 22px;}
     .agent-card .bubble {background: #f8fafc; border-radius: 22px 22px 22px 8px; border: 1px solid #e2e8f0;}
-    .upload-panel {background:#ffffff; border:1px solid #e5e7eb; border-radius:20px; padding:18px; margin-bottom:18px;}
-    .upload-button {background:#0f62fe; color:white; padding:12px 18px; border-radius:999px; border:none; font-weight:700; cursor:pointer;}
-    .upload-button:hover {background:#0958d9;}
-    .recommendation-card {background:#ffffff; padding:18px; border-radius:18px; border:1px solid #e3e8ff; margin-bottom:16px; box-shadow: 0 14px 30px rgba(15,98,254,0.05);}    
+    .recommendation-card {background:#ffffff; padding:18px; border-radius:18px; border:1px solid #e3e8ff; margin-bottom:16px; box-shadow: 0 10px 30px rgba(15,98,254,0.08);}    
     .recommendation-card a {color:#0f62fe; text-decoration:none;}
     .recommendation-tag {display:inline-block; background:#0f62fe; color:white; padding:5px 12px; border-radius:999px; font-size:12px; margin-bottom:12px;}
-    .sidebar-title {font-size:18px; font-weight:600; margin-bottom:8px;}
-    .page-banner {background: linear-gradient(135deg, rgba(15,98,254,0.13), rgba(15,98,254,0)); border-radius: 24px; padding: 24px 30px; margin-bottom: 20px;}
-    .banner-pill {display:inline-flex; align-items:center; gap:8px; background:#e7f0ff; color:#053d9a; padding:8px 14px; border-radius:999px; font-weight:600; margin-bottom:12px;}
-    .header-meta {color:#57606a; margin-top:0.5rem;}
+    .sidebar-section {margin-bottom: 24px;}
+    .sidebar-title {font-size:18px; font-weight:700; margin-bottom:12px;}
+    .sidebar-panel {background: #ffffff; border:1px solid #e5e7eb; border-radius: 18px; padding: 18px;}
+    .sidebar-link {color:#0f62fe; text-decoration:none;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown(
-    """
-    <div class='main-container'>
-      <div class='page-banner'>
-        <div class='banner-pill'>🧠 SHL Navigator</div>
-        <h1 class='page-title'>SHL Assessment Navigator</h1>
-        <p class='subtitle'>Use AI-guided recommendations to find the best SHL personality and leadership assessment for your hiring or development need.</p>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
+        """
+        <div class='main-container'>
+            <h1 class='page-title'>SHL Assessment Navigator</h1>
+            <p class='subtitle'>Use AI-guided recommendations to find the best SHL personality and leadership assessment for your hiring or development need.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
 )
 
 with st.sidebar:
-    st.markdown("## Interface Settings")
+    st.markdown("<div class='sidebar-section'><div class='sidebar-title'>Interface Settings</div></div>", unsafe_allow_html=True)
     st.text_input("Backend URL", key="backend_url")
-    st.markdown(f"**Active backend:** {st.session_state.backend_url}")
-    st.markdown("---")
-    st.markdown("## Conversation tools")
-    if st.session_state.chat_history:
+    backend_health = "Unknown"
+    try:
+        health_resp = requests.get(urljoin(st.session_state.backend_url.rstrip("/"), "/health"), timeout=2)
+        backend_health = "Online" if health_resp.status_code == 200 else f"Error {health_resp.status_code}"
+    except Exception:
+        backend_health = "Unavailable"
+    st.markdown(
+        f"**Active backend:** <a class='sidebar-link' href='{st.session_state.backend_url}' target='_blank'>{st.session_state.backend_url}</a><br>"
+        f"**Status:** {backend_health}",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div class='sidebar-section'><div class='sidebar-title'>Conversation sessions</div><div class='sidebar-panel'>", unsafe_allow_html=True)
+    if st.button("Start new conversation", key="new_conversation"):
+        new_conversation()
+        safe_rerun()
+
+    if st.session_state.messages:
         st.download_button(
-            label="Download chat history",
+            label="Download current conversation",
             data=chat_history_json(),
-            file_name="shl_chat_history.json",
+            file_name="shl_conversation_current.json",
             mime="application/json",
         )
-        if st.button("Clear conversation", key="clear_history"):
-            reset_conversation()
-            st.experimental_rerun()
+
+    if st.session_state.saved_conversations:
+        st.markdown("### Saved sessions")
+        for index, session in enumerate(st.session_state.saved_conversations, 1):
+            st.markdown(f"**{session['name']}**")
+            st.write(f"Created: {session['created_at']}")
+            restore_key = f"restore_saved_{index}"
+            if st.button(f"Restore {session['name']}", key=restore_key):
+                restore_conversation(index - 1)
+                safe_rerun()
+            st.download_button(
+                label=f"Download {session['name']}",
+                data=json.dumps(session, indent=2),
+                file_name=f"{session['name'].replace(' ', '_').lower()}.json",
+                mime="application/json",
+                key=f"download_saved_{index}",
+            )
     else:
-        st.info("Start a chat or upload a file to unlock conversation tools.")
-    st.markdown("---")
-    st.markdown("## Quick prompts")
-    st.markdown(
-        "- *I need an SHL test for a senior sales leader.*\n"
-        "- *Recommend an assessment for a technical manager role.*\n"
-        "- *What personality and leadership tools fit this hiring need?*"
+        st.write("No saved sessions yet. Start a conversation and click New Conversation to archive it.")
+
+    if st.button("Clear conversation", key="clear_history"):
+        reset_conversation()
+        safe_rerun()
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='sidebar-section'><div class='sidebar-title'>Quick prompts</div><div class='sidebar-panel'>", unsafe_allow_html=True)
+    if st.button("Senior leadership assessment", key="prompt_1"):
+        st.session_state.user_input = "I need a senior leadership assessment for a finance director."
+        safe_rerun()
+    if st.button("Personality test for customer success", key="prompt_2"):
+        st.session_state.user_input = "Recommend a personality test for a customer success manager."
+        safe_rerun()
+    if st.button("Talent development tools", key="prompt_3"):
+        st.session_state.user_input = "What SHL tools help with talent development in operations?"
+        safe_rerun()
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='sidebar-section'><div class='sidebar-title'>Help</div><div class='sidebar-panel'>", unsafe_allow_html=True)
+    st.write(
+        "This app connects to your backend `/chat` endpoint and recommends SHL assessments based on your brief. "
+        "Use the sidebar for settings, conversation tools, and prompts."
     )
-    st.markdown("---")
     if st.button("Reset conversation", key="reset_sidebar"):
         reset_conversation()
-        st.experimental_rerun()
+        safe_rerun()
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
-with st.expander("How this works", expanded=False):
+    st.write("\n")
+
+    st.markdown("<div class='sidebar-section'><div class='sidebar-title'>How this works</div><div class='sidebar-panel'>", unsafe_allow_html=True)
     st.write(
         "This Streamlit UI sends your request to the SHL assessment backend at `/chat`. "
         "The backend returns a conversational reply and a shortlist of SHL recommendation links. "
         "If your app is deployed separately from the backend, set the Backend URL accordingly."
     )
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 main_col, recommend_col = st.columns([3, 1])
 
 with main_col:
-    st.markdown("### Start the conversation")
-    bottom_bar = st.columns([0.12, 0.68, 0.2])
-    with bottom_bar[0]:
-        if st.button("+", key="upload_toggle", help="Upload files or past conversation traces"):
-            toggle_upload_panel()
-    with bottom_bar[1]:
+    st.markdown("<div class='search-panel'>", unsafe_allow_html=True)
+    st.markdown("<h2>Ask the SHL Agent</h2>", unsafe_allow_html=True)
+    row_cols = st.columns([0.08, 0.92])
+    with row_cols[0]:
+        if st.button("+", key="search_plus", help="Open upload controls in the search panel"):
+            st.session_state.show_file_uploader = not st.session_state.show_file_uploader
+            safe_rerun()
+    with row_cols[1]:
         user_input = st.text_area(
             "Describe your hiring or assessment need",
             height=180,
             placeholder="Example: I need an SHL assessment for a mid-level HR business partner role.",
             key="user_input",
+            label_visibility="collapsed",
         )
-    with bottom_bar[2]:
-        submit = st.button("Ask SHL Agent", type="primary")
-
-    st.markdown("#### Need inspiration?")
-    prompt_cols = st.columns(3)
-    prompts = [
-        "I need a senior leadership assessment for a finance director.",
-        "Recommend a personality test for a customer success manager.",
-        "What SHL tools help with talent development in operations?",
-    ]
-    for prompt_text, prompt_col in zip(prompts, prompt_cols):
-        if prompt_col.button(prompt_text, key=prompt_text):
-            st.session_state.user_input = prompt_text
-            st.experimental_rerun()
-
-    if st.session_state.show_upload_panel:
+    submit = st.button("Ask SHL Agent", type="primary")
+    if st.session_state.show_file_uploader:
+        st.markdown("<div class='search-note'>Upload any file directly here. The app accepts text, markdown, JSON, PDF, DOCX, and other text-based files.</div>", unsafe_allow_html=True)
         with st.container():
-            st.markdown("<div class='upload-panel'><strong>Upload a resume, job brief, or conversation trace</strong></div>", unsafe_allow_html=True)
-            st.markdown("Supported file types: `.txt`, `.md`, `.json`, `.pdf` — plain text is best for job briefs and conversation traces.")
-            st.markdown("If your document includes candidate background, role requirements, or assessment needs, upload it here and the agent will use it as context.")
-            uploaded_file = st.file_uploader("Choose a file", type=["txt", "md", "json", "pdf"], accept_multiple_files=False)
+            uploaded_file = st.file_uploader(
+                "Upload file for SHL assessment context",
+                type=None,
+                accept_multiple_files=False,
+                key="floating_upload",
+            )
             if uploaded_file is not None:
                 if uploaded_file.type == "application/pdf":
-                    st.warning("PDF upload is accepted, but only text-based parsing is supported. Plain-text job briefs and markdown traces work best.")
+                    st.warning("PDF upload is accepted, but only text-based parsing is supported.")
+                elif not uploaded_file.type:
+                    st.info("Uploaded file type is unknown. The backend will attempt text extraction if possible.")
                 try:
                     with st.spinner("Uploading file and extracting content..."):
                         ingest_response = call_backend_ingest(uploaded_file, st.session_state.backend_url)
-                    messages = ingest_response.get("messages", [])
-                    if messages:
-                        st.session_state.messages.extend(messages)
-                        st.session_state.chat_history.append(("user", f"Uploaded file: {uploaded_file.name}"))
-                        st.session_state.last_uploaded_file = uploaded_file.name
-                        st.success(f"Uploaded {uploaded_file.name} and added {len(messages)} messages to the chat history.")
+                    if ingest_response.get("error"):
+                        st.error(ingest_response.get("error"))
                     else:
-                        st.error("The uploaded file did not contain recognized chat traces or messages.")
+                        messages = ingest_response.get("messages", [])
+                        if messages:
+                            st.session_state.messages.extend(messages)
+                            st.session_state.last_uploaded_file = uploaded_file.name
+                            st.success(f"Uploaded {uploaded_file.name} and added {len(messages)} messages to the chat history.")
+                        else:
+                            st.error("The uploaded file did not contain recognized chat traces or messages.")
                 except requests.HTTPError as http_err:
                     st.error(f"Upload failed: {http_err}")
                 except Exception as exc:
                     st.error(f"Unable to upload file to backend at {st.session_state.backend_url}. {exc}")
+    if st.session_state.last_uploaded_file:
+        st.caption(f"Last upload: {st.session_state.last_uploaded_file}")
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if submit and user_input.strip():
         st.session_state.messages.append({"role": "user", "content": user_input.strip()})
+        assistant_placeholder = st.empty()
+        assistant_placeholder.info("SHL Agent is thinking...")
         try:
-            with st.spinner("Connecting to backend and generating recommendations..."):
-                result = call_backend_chat(st.session_state.messages, st.session_state.backend_url)
+            result = call_backend_chat(st.session_state.messages, st.session_state.backend_url)
+            assistant_placeholder.empty()
 
-            st.session_state.chat_history.append(("user", user_input.strip()))
-            st.session_state.chat_history.append(("assistant", result.get("reply", "")))
+            st.session_state.messages.append({"role": "assistant", "content": result.get("reply", "")})
             st.session_state.recommendations = result.get("recommendations", [])
             if result.get("end_of_conversation"):
                 st.success("This looks like a completed recommendation cycle.")
         except requests.HTTPError as http_err:
+            assistant_placeholder.empty()
             st.error(f"Backend error: {http_err}")
         except Exception as exc:
+            assistant_placeholder.empty()
             st.error(f"Unable to reach backend at {st.session_state.backend_url}. {exc}")
 
-    if st.session_state.last_uploaded_file:
-        st.info(f"Latest upload: {st.session_state.last_uploaded_file}")
-
-    if st.session_state.chat_history:
-        st.markdown("### Conversation")
-        for role, content in st.session_state.chat_history:
-            format_chat_message(role, content)
+    if st.session_state.messages:
+        st.markdown("<div class='chat-history-panel'>", unsafe_allow_html=True)
+        render_chat_messages(st.session_state.messages)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 with recommend_col:
     st.markdown("### Recommendations")
@@ -255,9 +340,3 @@ with recommend_col:
             )
             if score_line:
                 st.write(f"Score indicator: {score_line}")
-
-st.markdown("---")
-st.write(
-    "Need help deploying? Run the Python backend with `uvicorn main:app --reload` and then start Streamlit by running `streamlit run streamlit_app.py`. "
-    "For Render, use separate services or set `BACKEND_URL` to your backend service URL."
-)
