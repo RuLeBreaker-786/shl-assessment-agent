@@ -2,6 +2,8 @@ import re
 import json
 from typing import List, Optional
 
+# A few regex patterns and keywords to help the app recognize who is talking in a chat log,
+# or to spot standard resume sections like "Education" or "Work Experience".
 ROLE_USER_RE = re.compile(r"^\s*(?:\*\*\s*)?user\b[:\-]?", re.I)
 ROLE_ASSISTANT_RE = re.compile(r"^\s*(?:\*\*\s*)?(?:assistant|agent)\b[:\-]?", re.I)
 SECTION_HEADER_RE = re.compile(r"^\s*(?:#{1,6}\s*)?(?P<header>[A-Za-z][A-Za-z0-9 &/\-]{1,100})\s*[:\-\–]?\s*$")
@@ -41,12 +43,16 @@ RESUME_SECTION_KEYWORDS = {
 
 
 def normalize_section_title(title: str) -> str:
+    # Cleans up messy section titles so they look nice and uniform 
+    # (like turning "WORK--EXPERIENCE" into "Work Experience").
     title = title.strip()
     title = re.sub(r"[\s\-_]+", " ", title)
     return title.title()
 
 
 def is_resume_section_header(line: str) -> Optional[str]:
+    # Checks a single line of text to see if it looks like a resume header 
+    # based on our keyword list above. If it's too long, we ignore it.
     if not line or len(line.strip()) > 80:
         return None
 
@@ -62,6 +68,8 @@ def is_resume_section_header(line: str) -> Optional[str]:
 
 
 def parse_resume_sections(text: str) -> List[dict]:
+    # Reads through a whole document line by line, chopping it up into distinct 
+    # resume sections based on the headers it finds. It also catches any intro text.
     lines = text.splitlines()
     sections = []
     current_title = None
@@ -105,6 +113,8 @@ def parse_resume_sections(text: str) -> List[dict]:
 
 
 def extract_resume_sections(text: str) -> List[dict]:
+    # Takes the raw sections we found earlier and repackages them into a neat 
+    # dictionary format so it's easier for the rest of the app to pull out just the title or body.
     section_messages = parse_resume_sections(text)
     structured_sections = []
     for msg in section_messages:
@@ -127,6 +137,8 @@ def extract_resume_sections(text: str) -> List[dict]:
 
 
 def parse_trace_lines(lines: List[str]):
+    # Reads a raw chat transcript and figures out who is talking ('user' vs 'assistant'), 
+    # bundling their text into separate message bubbles.
     messages = []
     cur_role = None
     cur_buf = []
@@ -179,6 +191,8 @@ def parse_trace_lines(lines: List[str]):
 
 
 def convert_text_to_messages(text: str):
+    # The main traffic cop of this file. It checks if the text is already JSON, 
+    # then sees if it looks like a resume, and if all else fails, treats it as a chat log.
     try:
         j = json.loads(text)
         if isinstance(j, dict) and "messages" in j:
@@ -195,6 +209,8 @@ def convert_text_to_messages(text: str):
 
 
 def convert_file_to_json(path):
+    # A handy little helper that opens a file on your computer, runs our conversion 
+    # logic on it, and packages the result into a clean JSON object.
     txt = open(path, "r", encoding="utf-8").read()
     msgs = convert_text_to_messages(txt)
     return {"messages": msgs}
