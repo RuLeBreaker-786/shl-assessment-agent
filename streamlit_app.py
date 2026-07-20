@@ -30,6 +30,7 @@ if "recommendations" not in st.session_state:
 
 
 def archive_current_conversation():
+    # Packages up the active chat and saves it to our history list so the user can look back at it later.
     if st.session_state.messages:
         session_name = f"Session {len(st.session_state.saved_conversations) + 1}"
         st.session_state.saved_conversations.append(
@@ -42,6 +43,7 @@ def archive_current_conversation():
 
 
 def reset_conversation():
+    # Wipes the slate clean by clearing out the current messages, recommendations, and inputs.
     st.session_state.messages = []
     st.session_state.recommendations = []
     st.session_state.last_uploaded_file = ""
@@ -50,6 +52,7 @@ def reset_conversation():
 
 
 def restore_conversation(index: int):
+    # Brings a previously saved chat session back onto the main screen.
     session = st.session_state.saved_conversations[index]
     st.session_state.messages = [m.copy() for m in session["messages"]]
     st.session_state.recommendations = []
@@ -59,26 +62,30 @@ def restore_conversation(index: int):
 
 
 def new_conversation():
+    # Safely tucks away the current chat (if there is one) and starts a brand-new one.
     if st.session_state.messages:
         archive_current_conversation()
     reset_conversation()
 
 
 def safe_rerun():
-    """Attempt to rerun the Streamlit script; silently no-op if not available."""
+    # Forces the Streamlit UI to refresh and show updates, but fails gracefully if the host environment doesn't allow it.
     try:
-        # older/newer streamlit variations — guard against absence
         if hasattr(st, "experimental_rerun"):
             st.experimental_rerun()
         elif hasattr(st, "rerun"):
             st.rerun()
     except Exception:
-        # If rerun isn't supported in the running environment (e.g. Render runtime), ignore
         pass
+
+
 def chat_history_json() -> str:
+    # Formats the current chat log into a neat JSON string so the user can download it.
     return json.dumps({"messages": st.session_state.messages}, indent=2)
 
+
 def format_chat_message(role: str, content: str) -> None:
+    # Wraps the raw text in some HTML and CSS so it looks like a nice, modern chat bubble.
     if role == "user":
         st.markdown(
             f"<div class='chat-card user-card'><div class='bubble'><strong>You</strong><p>{content}</p></div></div>",
@@ -90,16 +97,20 @@ def format_chat_message(role: str, content: str) -> None:
             unsafe_allow_html=True,
         )
 
+
 def render_chat_messages(messages):
+    # Loops through all the messages in the history and draws them on the screen one by one.
     for msg in messages:
         format_chat_message(msg.get("role", "user"), msg.get("content", ""))
 
 
 def conversation_json_payload(messages):
+    # Preps the chat history to be sent over to the backend API.
     return json.dumps({"messages": messages}, indent=2)
 
 
 def call_backend_chat(messages, backend_url):
+    # Actually reaches out to the backend server with our chat history and waits for the AI's reply.
     url = urljoin(backend_url.rstrip("/"), "/chat")
     payload = {"messages": messages}
     response = requests.post(url, json=payload, timeout=20)
@@ -108,6 +119,7 @@ def call_backend_chat(messages, backend_url):
 
 
 def call_backend_ingest(uploaded_file, backend_url):
+    # Sends a file the user uploaded over to the backend so the AI can read it and extract the text.
     url = urljoin(backend_url.rstrip("/"), "/ingest")
     content_type = uploaded_file.type or "application/octet-stream"
     files = {"file": (uploaded_file.name, uploaded_file.getvalue(), content_type)}
