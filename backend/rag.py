@@ -12,6 +12,7 @@ RETRIEVAL_INDEX = None
 groq_client = None
 
 def tokenize(text: str) -> List[str]:
+    # Chops up a big block of text into clean, lowercase words, throwing out the tiny ones.
     if not text:
         return []
     cleaned = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
@@ -25,6 +26,7 @@ def tokenize(text: str) -> List[str]:
     return tokens
 
 def expand_query_tokens(tokens: List[str]) -> List[str]:
+    # A little synonym dictionary so if the user searches for "manager", we also look for "leader".
     synonyms = {
         "leadership": ["leadership", "leader", "manager"],
         "leader": ["leadership", "leader", "manager"],
@@ -42,6 +44,7 @@ def expand_query_tokens(tokens: List[str]) -> List[str]:
     return expanded
 
 def build_document_text(item: dict) -> str:
+    # Mashes all the useful bits of a catalog item (name, description, etc.) into one big searchable string.
     parts = [
         item.get("name", ""),
         item.get("description", ""),
@@ -52,6 +55,7 @@ def build_document_text(item: dict) -> str:
     return " ".join(part for part in parts if part)
 
 def build_retrieval_index(catalog: List[dict]) -> dict:
+    # Builds our own lightweight search engine (BM25 format) so we don't have to scan the whole database every time.
     documents = []
     doc_freq = Counter()
     for item in catalog:
@@ -75,6 +79,7 @@ def build_retrieval_index(catalog: List[dict]) -> dict:
     }
 
 def retrieve_relevant_items(query: str, index: Optional[dict] = None, top_k: int = 8) -> List[dict]:
+    # The actual search function! It compares the user's text against our index and scores the best matches.
     if index is None:
         index = RETRIEVAL_INDEX
     if not index or not index.get("documents"):
@@ -103,10 +108,12 @@ def retrieve_relevant_items(query: str, index: Optional[dict] = None, top_k: int
             tf_component = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / max(1.0, index["avg_doc_len"])))
             score += index["idf_cache"].get(term, 0.0) * tf_component * query_weight
 
+        # Boost scores if certain magic words appear in the text
         for term, query_weight in query_counter.items():
             if term in item_text:
                 score += 0.15 * query_weight
 
+        # A bunch of manual score multipliers to make sure personality/leadership tests bubble up to the top.
         if "personality" in query_counter and any(term in item_text for term in ["personality", "behavior", "behaviour"]):
             score += 1.8
         if "leadership" in query_counter and any(term in item_text for term in ["leadership", "leader", "manager"]):
@@ -146,9 +153,9 @@ def retrieve_relevant_items(query: str, index: Optional[dict] = None, top_k: int
     return scored_items[:top_k]
 
 def load_catalog_data() -> None:
+    # Wakes up, loads our big JSON database into memory, and connects to Groq.
     global CATALOG, RETRIEVAL_INDEX, groq_client
     try:
-        # Adjusted path to point back to the root directory
         catalog_path = Path(__file__).resolve().parent.parent / "shl_product_catalog.json"
         with catalog_path.open("r", encoding="utf-8") as f:
             CATALOG = json.load(f)
