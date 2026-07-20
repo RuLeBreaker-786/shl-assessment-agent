@@ -2,6 +2,9 @@ import argparse
 import uvicorn
 from backend.api import app
 
+# This is just a middleman file now. Render looks for main.py to start up, 
+# so this script just grabs our new modular backend and tells Uvicorn to run it.
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the SHL assessment FastAPI app.")
     parser.add_argument("--host", default="0.0.0.0", help="Host address to bind")
