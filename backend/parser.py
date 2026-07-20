@@ -3,6 +3,7 @@ import backend.rag as rag
 from backend.schemas import Message
 
 def get_grounding_context(user_history: str) -> str:
+    # Takes the user's chat, finds the top 8 matching tests, and formats them so our LLM can read them easily.
     matches = rag.retrieve_relevant_items(user_history, top_k=8)
     context_items = []
     for match in matches:
@@ -20,6 +21,7 @@ def get_grounding_context(user_history: str) -> str:
     return "\n".join(context_items[:8])
 
 def parse_explicit_request(text: str) -> tuple[bool, List[str], Optional[str]]:
+    # Plays detective to see if the user specifically asked for a certain role or skill level in their message.
     text = text.lower()
     explicit_keywords = []
     job_level = None
@@ -45,6 +47,7 @@ def parse_explicit_request(text: str) -> tuple[bool, List[str], Optional[str]]:
     return explicit, explicit_keywords, job_level
 
 def parse_refuse_request(text: str) -> bool:
+    # A quick guardrail to catch if someone is asking for legal advice so we can shut it down gracefully.
     text = text.lower()
     legal_advice_terms = ["legal advice", "terminate", "termination", "employee contract", "employment contract", "wrongful termination", "dismissal", "lawyer", "lawsuit", "court"]
     legal_context_terms = ["legal", "contract", "employee", "employment", "uk", "britain", "british"]
@@ -56,6 +59,7 @@ def parse_refuse_request(text: str) -> bool:
     return False
 
 def is_resume_section_message(content: str) -> bool:
+    # Looks at the first line of a message to guess if it's a piece of a resume (like 'Skills' or 'Work Experience').
     if not content:
         return False
     first_line = content.splitlines()[0].strip().lower()
@@ -72,13 +76,16 @@ def is_resume_section_message(content: str) -> bool:
     ])
 
 def extract_resume_sections(messages: List[Message]) -> List[Message]:
+    # Filters the whole chat history and pulls out ONLY the messages that look like resume chunks.
     return [m for m in messages if m.role == "user" and is_resume_section_message(m.content)]
 
 def get_last_user_query(messages: List[Message]) -> str:
+    # Finds the last thing the user actually asked, skipping over any massive resume uploads.
     non_resume = [m.content for m in messages if m.role == "user" and not is_resume_section_message(m.content)]
     return non_resume[-1].strip() if non_resume else (messages[-1].content.strip() if messages else "")
 
 def build_resume_search_text(resume_sections: List[Message], query_text: str) -> str:
+    # Glues the user's question and relevant resume chunks together so we can feed it into the search engine.
     query_lower = query_text.lower() if query_text else ""
     selected_sections = []
 
