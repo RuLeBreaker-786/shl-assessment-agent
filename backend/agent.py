@@ -3,6 +3,7 @@ from backend.schemas import Message, ChatResponse, Recommendation
 from backend.rag import retrieve_relevant_items
 from backend.parser import extract_resume_sections, get_last_user_query, build_resume_search_text, parse_refuse_request, parse_explicit_request
 
+# The master rulebook we send to the LLM so it knows exactly how to behave.
 SYSTEM_PROMPT = """You are a strict, logical Conversational SHL Assessment Recommender.
 Your sole job is to guide recruiters from vague requirements to a structured shortlist of SHL Individual Test Solutions.
 
@@ -23,6 +24,7 @@ You must reply with a valid JSON object matching this exact structure:
 }"""
 
 def local_catalog_search(keywords: List[str], job_level: Optional[str] = None) -> List[dict]:
+    # A tiny wrapper to do a quick catalog search without needing the AI to translate the intent.
     normalized_keywords = [kw.lower() for kw in keywords if kw]
     if not normalized_keywords:
         normalized_keywords = ["assessment"]
@@ -32,6 +34,7 @@ def local_catalog_search(keywords: List[str], job_level: Optional[str] = None) -
     return retrieve_relevant_items(query, top_k=10)
 
 def infer_local_recommendations(messages: List[Message]) -> ChatResponse:
+    # Our emergency backup plan. If the LLM goes down, this tries to guess the best response using hardcoded logic.
     resume_sections = extract_resume_sections(messages)
     last_query = get_last_user_query(messages)
 
