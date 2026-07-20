@@ -1,0 +1,4 @@
+.devcontainer/
+scripts/
+tests/
+run_dev.sh
